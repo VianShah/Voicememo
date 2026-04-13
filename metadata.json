@@ -1,0 +1,7 @@
+{
+  "name": "The Insight Recorder",
+  "description": "A smart highlight recorder that transforms raw audio into a curated gallery of insights using AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
