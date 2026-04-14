@@ -15,7 +15,7 @@ app.use(express.json({ limit: '50mb' }));
 // Initialize Gemini with the standard SDK
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY || "" });
-const indexName = process.env.PINECONE_INDEX || "insights";
+const indexName = process.env.PINECONE_INDEX || "voicememos";
 
 // Helper to get embeddings using Pinecone Inference API (Trilingual: English, Hindi, Gujarati)
 async function getEmbedding(text: string, type: 'passage' | 'query' = 'passage'): Promise<number[]> {
