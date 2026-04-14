@@ -4,7 +4,6 @@ import { Mic, Square, List, Plus, X, ChevronLeft, Play, Pause, Share2, Search, S
 import Waveform from './components/Waveform';
 import InsightCard from './components/InsightCard';
 import { Insight } from './types';
-import { stripSilence } from './lib/audioUtils';
 
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
@@ -82,42 +81,39 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const processAudio = async (audioBlob: Blob, duration: number, originalMimeType: string) => {
+  const processAudio = async (audioBlob: Blob, duration: number) => {
     setIsProcessing(true);
     try {
-      const cleanAudioBlob = await stripSilence(audioBlob);
-      const audioUrl = URL.createObjectURL(cleanAudioBlob);
-      
-      const reader = new FileReader();
-      reader.readAsDataURL(cleanAudioBlob);
-      reader.onloadend = async () => {
-        const base64data = (reader.result as string).split(',')[1];
-        
-        // Call backend for analysis and vector storage
-        const response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioBase64: base64data, mimeType: 'audio/wav' })
-        });
-        
-        if (!response.ok) throw new Error('Analysis failed');
-        const analysis = await response.json();
-        
-        const newInsight: Insight = {
-          timestamp: Date.now(),
-          duration: duration,
-          audioUrl,
-          ...analysis,
-          highlights: analysis.highlights.map((h: any) => ({
-            ...h,
-            id: Math.random().toString(36).substr(2, 9),
-          }))
-        };
+      // Send raw audio via multipart FormData — server handles DSP + conversion
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
 
-        setInsights(prev => [newInsight, ...prev]);
-        setIsProcessing(false);
-        setView('gallery');
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData, // No Content-Type header — browser sets multipart boundary
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || 'Analysis failed');
+      }
+      const analysis = await response.json();
+
+      // Use server-hosted audio URL for persistent cross-device playback
+      const newInsight: Insight = {
+        timestamp: Date.now(),
+        duration: duration,
+        audioUrl: analysis.audioUrl || '',
+        ...analysis,
+        highlights: (analysis.highlights || []).map((h: any) => ({
+          ...h,
+          id: h.id || Math.random().toString(36).substr(2, 9),
+        })),
       };
+
+      setInsights((prev) => [newInsight, ...prev]);
+      setIsProcessing(false);
+      setView('gallery');
     } catch (error) {
       console.error('Processing failed', error);
       setIsProcessing(false);
@@ -128,19 +124,8 @@ export default function App() {
   const handleFileUpload = async (e: any) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    const audioContext = new AudioContext();
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      const duration = audioBuffer.duration;
-      await processAudio(file, duration, file.type);
-    } catch (err) {
-      console.error('File processing failed', err);
-      alert('Unsupported or corrupted audio file.');
-    } finally {
-      audioContext.close();
-    }
+    // Send file directly — no client-side AudioContext decoding needed
+    await processAudio(file, 0);
   };
 
   const startRecording = async () => {
@@ -155,7 +140,7 @@ export default function App() {
       };
       mediaRecorder.onstop = async () => {
         const rawAudioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        await processAudio(rawAudioBlob, recordTime, 'audio/webm');
+        await processAudio(rawAudioBlob, recordTime);
       };
       mediaRecorder.start();
       setIsRecording(true);
