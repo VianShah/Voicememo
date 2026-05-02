@@ -3,11 +3,12 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { convertWebmToWav } from '../lib/ffmpeg';
-import { analyzeAudio } from '../lib/gemini';
+import { extractInsights } from '../lib/gemini';
 import { upsertInsightToIndex } from '../lib/pinecone';
 import { logger } from '../lib/logger';
 
 const router = express.Router();
+
 
 // Ensure uploads directory exists
 const uploadDir = path.resolve('uploads');
@@ -66,17 +67,48 @@ router.post('/upload', upload.single('audio'), async (req, res): Promise<void> =
       output: wavPath,
     });
 
-    // ── STEP 2: Gemini Files API ──────────────────────────────────
-    const step2Start = Date.now();
-    logger.info(`[${requestId}] [Step 2/3] Gemini: uploading to Files API + analyzing`);
+    // ── STEP 2: Whisper Transcription ──────────────────────────────
+    const step2WhisperStart = Date.now();
+    logger.info(`[${requestId}] [Step 2a/3] Whisper: transcribing audio`);
 
-    const analysis = await analyzeAudio(wavPath, 'audio/wav', requestId);
-    const step2Ms = Date.now() - step2Start;
+    const whisperUrl = process.env.WHISPER_API_URL || 'http://127.0.0.1:9000';
+    const audioBuffer = fs.readFileSync(wavPath);
+    const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
+    
+    const formData = new FormData();
+    formData.append('file', audioBlob, 'audio.wav');
+    formData.append('model', 'whisper-1');
 
-    logger.info(`[${requestId}] [Step 2/3] ✓ Gemini done`, {
-      durationMs: step2Ms,
+    const whisperRes = await fetch(`${whisperUrl}/v1/audio/transcriptions`, {
+      method: 'POST',
+      body: formData as any, // native fetch FormData is typed differently sometimes
+    });
+
+    if (!whisperRes.ok) {
+      const errText = await whisperRes.text();
+      throw new Error(`Whisper transcription failed: ${errText}`);
+    }
+
+    const whisperData = (await whisperRes.json()) as any;
+    const transcriptText = whisperData.text || '';
+    const step2WhisperMs = Date.now() - step2WhisperStart;
+
+    logger.info(`[${requestId}] [Step 2a/3] ✓ Whisper done`, {
+      durationMs: step2WhisperMs,
+      transcriptWords: transcriptText.split(' ').length,
+    });
+
+    // ── STEP 2b: Gemini Insights ──────────────────────────────
+    const step2GeminiStart = Date.now();
+    logger.info(`[${requestId}] [Step 2b/3] Gemini: extracting insights from text`);
+
+    const analysis = await extractInsights(transcriptText, requestId);
+    const step2GeminiMs = Date.now() - step2GeminiStart;
+    const step2Ms = step2WhisperMs + step2GeminiMs;
+
+    logger.info(`[${requestId}] [Step 2b/3] ✓ Gemini done`, {
+      durationMs: step2GeminiMs,
       title: analysis.title,
-      transcriptWords: analysis.transcript?.split(' ').length,
       highlightCount: analysis.highlights?.length,
       tokensUsed: analysis._usage ?? 'unavailable',
     });

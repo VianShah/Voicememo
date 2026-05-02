@@ -1,6 +1,13 @@
 version: '3.8'
 
 services:
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    ports:
+      - "9000:9000"
+
   web:
     build:
       context: ./web
@@ -27,7 +34,9 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - PINECONE_API_KEY=${PINECONE_API_KEY}
       - PINECONE_INDEX=${PINECONE_INDEX}
+      - WHISPER_API_URL=http://whisper:9000
     volumes:
       - ./server/src:/app/src
     env_file:
       - .env
+

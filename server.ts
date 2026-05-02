@@ -5,7 +5,6 @@ import fs from "fs";
 import multer from "multer";
 import ffmpeg from "fluent-ffmpeg";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
 import { Pinecone } from "@pinecone-database/pinecone";
 import dotenv from "dotenv";
 
@@ -13,6 +12,16 @@ dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "7860");
+
+// ── Job Tracker for Async Processing ────────────────────────────────
+interface Job {
+  id: string;
+  status: "uploading" | "converting" | "transcribing" | "analyzing" | "completed" | "failed";
+  progress: number;
+  result?: any;
+  error?: string;
+}
+const jobs = new Map<string, Job>();
 
 // ── Storage paths ────────────────────────────────────────────────────
 // HF Spaces mounts persistent volume at /data (only at runtime, not build)
@@ -43,7 +52,6 @@ const upload = multer({
 
 // ── AI & Vector DB clients ──────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const fileManager = new GoogleAIFileManager(process.env.GEMINI_API_KEY || "");
 const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY || "" });
 const indexName = process.env.PINECONE_INDEX || "voicememos";
 
@@ -67,80 +75,138 @@ function convertToWav(inputPath: string): Promise<string> {
   });
 }
 
-// ── Gemini Files API: upload, poll, analyze ─────────────────────────
-async function analyzeAudioViaFilesAPI(
-  wavPath: string,
-  requestId: string
-): Promise<any> {
-  const fileSizeMB = (fs.statSync(wavPath).size / 1024 / 1024).toFixed(2);
-  console.log(`⏳ [Gemini] Uploading ${fileSizeMB}MB to Files API...`);
+interface WhisperWord {
+  word: string;
+  start: number;
+  end: number;
+}
 
-  // 1. Upload to Gemini Files API (supports up to 2GB)
-  const uploadResult = await fileManager.uploadFile(wavPath, {
-    mimeType: "audio/wav",
-    displayName: `insight-${requestId}`,
+interface WhisperSegment {
+  text: string;
+  start: number;
+  end: number;
+  words?: WhisperWord[];
+}
+
+interface WhisperResponse {
+  text: string;
+  segments: WhisperSegment[];
+  words?: WhisperWord[];
+  language?: string;
+}
+
+const WHISPER_URL = process.env.WHISPER_URL || "http://127.0.0.1:9000";
+
+async function transcribeWithWhisper(wavPath: string): Promise<WhisperResponse> {
+  const formData = new FormData();
+  const fileBuffer = fs.readFileSync(wavPath);
+  formData.append("file", new Blob([fileBuffer], { type: "audio/wav" }), "audio.wav");
+  formData.append("model", "whisper-1");
+  formData.append("response_format", "verbose_json");
+
+  console.log(`⏳ [Whisper] Uploading to local Whisper STT...`);
+  const response = await fetch(`${WHISPER_URL}/v1/audio/transcriptions`, {
+    method: "POST",
+    body: formData,
   });
 
-  console.log(`✅ [Gemini] Uploaded: ${uploadResult.file.name} (state: ${uploadResult.file.state})`);
+  if (!response.ok) {
+    throw new Error(`Whisper STT failed: ${response.status} ${await response.text()}`);
+  }
 
-  // 2. Poll until file is ACTIVE (large files can stay in PROCESSING)
-  let fileState = uploadResult.file.state as string;
-  let pollAttempts = 0;
-  const MAX_POLLS = 30; // 30 × 3s = 90s max wait
+  return response.json();
+}
 
-  while (fileState === FileState.PROCESSING) {
-    if (pollAttempts >= MAX_POLLS) {
-      throw new Error("Gemini file processing timed out after 90s");
+function resolveHighlightTimestamps(highlights: any[], wordTimestamps: WhisperWord[]): any[] {
+  if (!wordTimestamps || wordTimestamps.length === 0) {
+    return highlights.map((h, i) => ({ id: h.id ?? `h${i + 1}`, ...h }));
+  }
+
+  return highlights.map((h, i) => {
+    const highlightWords = h.text.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter(Boolean);
+    if (highlightWords.length === 0) return { id: `h${i + 1}`, ...h };
+    
+    const firstWord = highlightWords[0];
+    
+    let startIdx = -1;
+    for (let j = 0; j < wordTimestamps.length; j++) {
+      const cleanW = wordTimestamps[j].word.toLowerCase().replace(/[^\w\s]/g, "");
+      if (cleanW === firstWord || cleanW.includes(firstWord) || firstWord.includes(cleanW)) {
+        
+        let matchCount = 1;
+        let k = 1;
+        while (k < highlightWords.length && j + k < wordTimestamps.length) {
+          const w1 = highlightWords[k];
+          const w2 = wordTimestamps[j + k].word.toLowerCase().replace(/[^\w\s]/g, "");
+          if (w2 === w1 || w2.includes(w1) || w1.includes(w2)) {
+            matchCount++;
+          }
+          k++;
+        }
+        
+        // If >= 50% words matched in sequence, accept it
+        if (matchCount / highlightWords.length >= 0.5) {
+          startIdx = j;
+          break;
+        }
+      }
     }
-    await new Promise((r) => setTimeout(r, 3000));
-    const updatedFile = await fileManager.getFile(uploadResult.file.name);
-    fileState = updatedFile.state as string;
-    pollAttempts++;
-    console.log(`🔄 [Gemini] Polling... attempt ${pollAttempts}, state: ${fileState}`);
-  }
 
-  if (fileState === FileState.FAILED) {
-    throw new Error("Gemini File API processing FAILED");
-  }
+    if (startIdx >= 0) {
+      const endIdx = Math.min(startIdx + highlightWords.length - 1, wordTimestamps.length - 1);
+      return {
+        id: `h${i + 1}`,
+        text: h.text,
+        tag: h.tag,
+        startTime: wordTimestamps[startIdx].start,
+        endTime: wordTimestamps[endIdx].end,
+      };
+    }
 
-  console.log(`✅ [Gemini] File is ACTIVE — starting analysis...`);
+    return { id: `h${i + 1}`, ...h };
+  });
+}
 
-  // 3. Analyze with Gemini
+async function analyzeTranscriptWithGemini(
+  transcript: string,
+  wordTimestamps: WhisperWord[],
+  requestId: string
+): Promise<any> {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `You are an expert insight extractor for voice memos.
-Analyze this audio recording carefully.
+Analyze this transcript carefully.
+
+TRANSCRIPT:
+${transcript}
+
+WORD TIMESTAMPS (for reference — use these to select precise highlight boundaries):
+${JSON.stringify((wordTimestamps || []).slice(0, 500))}
+
 Return ONLY valid JSON (no markdown, no backticks) with this structure:
 {
   "title": "a short, catchy title (max 8 words)",
-  "transcript": "verbatim full transcript (supports English, Hindi, Gujarati)",
   "summary": "2-3 sentence summary of what was discussed",
   "mood": "calm|energetic|reflective",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "highlights": [
     {
-      "text": "verbatim quote that was impactful",
+      "text": "verbatim quote from the transcript (must match exactly)",
       "tag": "#Realization|#ActionItem|#Memory",
       "startTime": 0,
-      "endTime": 15
+      "endTime": 10
     }
   ]
-}`;
+}
 
-  const result = await model.generateContent([
-    {
-      fileData: {
-        mimeType: uploadResult.file.mimeType,
-        fileUri: uploadResult.file.uri,
-      },
-    },
-    { text: prompt },
-  ]);
+CRITICAL RULES:
+1. The "text" in highlights MUST be a verbatim substring of the transcript.
+2. The startTime and endTime SHOULD be precise based on the word timestamps if available.
+3. Select the 3 most impactful segments as highlights.
+4. Each highlight should be approximately 10-20 seconds of speech.`;
 
-  const usage = result.response.usageMetadata;
-  console.log(`✅ [Gemini] Analysis complete (tokens: ${usage?.totalTokenCount})`);
+  const result = await model.generateContent(prompt);
 
-  // 4. Parse JSON safely
   let raw = result.response.text().trim();
   raw = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
 
@@ -152,20 +218,8 @@ Return ONLY valid JSON (no markdown, no backticks) with this structure:
     throw new Error("Gemini returned malformed JSON");
   }
 
-  // Ensure highlights always have an id
   if (parsed.highlights) {
-    parsed.highlights = parsed.highlights.map((h: any, i: number) => ({
-      id: h.id ?? `h${i + 1}`,
-      ...h,
-    }));
-  }
-
-  // 5. Cleanup file from Files API
-  try {
-    await fileManager.deleteFile(uploadResult.file.name);
-    console.log(`🗑 [Gemini] Remote file deleted from Files API`);
-  } catch {
-    console.warn(`⚠ [Gemini] Could not delete remote file (non-fatal)`);
+    parsed.highlights = resolveHighlightTimestamps(parsed.highlights, wordTimestamps || []);
   }
 
   return parsed;
@@ -239,98 +293,96 @@ async function embedAndUpsert(
 // API ROUTES
 // ══════════════════════════════════════════════════════════════════════
 
-// ── POST /api/analyze — multipart audio upload + full pipeline ──────
+// ── POST /api/analyze — async multipart audio upload ───────────────
 app.post("/api/analyze", upload.single("audio"), async (req, res) => {
-  const requestId = `req-${Date.now()}`;
-  const pipelineStart = Date.now();
-
-  console.log(`\n▶ [${requestId}] Upload received:`, {
-    size: req.file?.size,
-    mimetype: req.file?.mimetype,
-    path: req.file?.path,
-  });
-
+  const jobId = `job-${Date.now()}`;
+  const requestId = jobId;
+  
   if (!req.file) {
     res.status(400).json({ error: "No audio file uploaded" });
     return;
   }
 
-  try {
-    // ── STEP 1: FFmpeg conversion ─────────────────────────────────
-    const step1Start = Date.now();
-    console.log(`[${requestId}] [Step 1/3] FFmpeg: converting to WAV...`);
-    const wavPath = await convertToWav(req.file.path);
-    const step1Ms = Date.now() - step1Start;
-    console.log(`[${requestId}] [Step 1/3] ✓ FFmpeg done (${step1Ms}ms)`);
+  // Initialize Job
+  const job: Job = { id: jobId, status: "converting", progress: 10 };
+  jobs.set(jobId, job);
 
-    // ── STEP 2: Gemini Files API analysis ─────────────────────────
-    const step2Start = Date.now();
-    console.log(`[${requestId}] [Step 2/3] Gemini: analyzing audio...`);
-    const analysis = await analyzeAudioViaFilesAPI(wavPath, requestId);
-    const step2Ms = Date.now() - step2Start;
-    console.log(`[${requestId}] [Step 2/3] ✓ Gemini done (${step2Ms}ms)`);
+  // Return Job ID immediately to prevent browser timeout
+  res.json({ jobId });
 
-    // ── STEP 3: Pinecone batch embed + upsert ─────────────────────
-    const step3Start = Date.now();
-    const insightId = `ins-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
-    console.log(`[${requestId}] [Step 3/3] Pinecone: batch embedding...`);
-
-    // Build audio URL for persistent storage
-    const audioFilename = `${insightId}.wav`;
-    const audioStoragePath = path.join(STORAGE_DIR, audioFilename);
-    const audioUrl = `/api/recordings/${audioFilename}`;
-
-    await embedAndUpsert(
-      insightId,
-      analysis.transcript,
-      {
-        title: analysis.title,
-        summary: analysis.summary,
-        tags: (analysis.tags as string[]).join(","),
-        audioUrl,
-        timestamp: Date.now(),
-      },
-      requestId
-    );
-    const step3Ms = Date.now() - step3Start;
-    console.log(`[${requestId}] [Step 3/3] ✓ Pinecone done (${step3Ms}ms)`);
-
-    // ── Save audio to persistent storage ──────────────────────────
+  // EXECUTE PIPELINE IN BACKGROUND
+  (async () => {
     try {
+      const wavPath = await convertToWav(req.file!.path);
+      job.status = "transcribing";
+      job.progress = 30;
+      
+      const whisperResult = await transcribeWithWhisper(wavPath);
+      job.status = "analyzing";
+      job.progress = 60;
+
+      const analysis = await analyzeTranscriptWithGemini(
+        whisperResult.text, 
+        whisperResult.words || [], 
+        requestId
+      );
+      analysis.transcript = whisperResult.text;
+      
+      const insightId = `ins-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+      job.status = "analyzing"; // Finalizing DB
+      job.progress = 85;
+
+      const audioFilename = `${insightId}.wav`;
+      const audioStoragePath = path.join(STORAGE_DIR, audioFilename);
+      const audioUrl = `/api/recordings/${audioFilename}`;
+
+      await embedAndUpsert(
+        insightId,
+        analysis.transcript,
+        {
+          title: analysis.title,
+          summary: analysis.summary,
+          tags: (analysis.tags as string[]).join(","),
+          audioUrl,
+          timestamp: Date.now(),
+        },
+        requestId
+      );
+
       fs.copyFileSync(wavPath, audioStoragePath);
-      console.log(`💾 [${requestId}] Audio saved to ${audioStoragePath}`);
-    } catch (storageErr) {
-      console.warn(`⚠ [${requestId}] Failed to save audio to persistent storage:`, storageErr);
+      
+      // Cleanup
+      try {
+        fs.unlinkSync(req.file!.path);
+        fs.unlinkSync(wavPath);
+      } catch {}
+
+      // Complete
+      job.status = "completed";
+      job.progress = 100;
+      job.result = { ...analysis, id: insightId, audioUrl };
+
+    } catch (error: any) {
+      console.error(`❌ [${jobId}] Job failed:`, error?.message);
+      job.status = "failed";
+      job.error = error?.message || "Internal processing error";
+      try { if (req.file?.path) fs.unlinkSync(req.file.path); } catch {}
     }
+  })();
+});
 
-    // ── Cleanup temp files ────────────────────────────────────────
-    try {
-      fs.unlinkSync(req.file.path);
-      fs.unlinkSync(wavPath);
-      console.log(`🗑 [${requestId}] Temp files cleaned up`);
-    } catch {
-      console.warn(`⚠ [${requestId}] Temp file cleanup failed (non-fatal)`);
-    }
-
-    const totalMs = Date.now() - pipelineStart;
-    console.log(`\n✅ [${requestId}] Pipeline complete in ${totalMs}ms`, {
-      ffmpegMs: step1Ms,
-      geminiMs: step2Ms,
-      pineconeMs: step3Ms,
-    });
-
-    res.json({
-      ...analysis,
-      id: insightId,
-      audioUrl,
-    });
-  } catch (error: any) {
-    console.error(`❌ [${requestId}] Pipeline failed:`, error?.message);
-    // Cleanup temp file on error
-    try {
-      if (req.file?.path) fs.unlinkSync(req.file.path);
-    } catch {}
-    res.status(500).json({ error: "Failed to process audio", detail: error?.message });
+// ── GET /api/job-progress/:id — Polling endpoint ───────────────────
+app.get("/api/job-progress/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  res.json(job);
+  
+  // Cleanup completed/failed jobs from memory after they are fetched
+  if (job.status === "completed" || job.status === "failed") {
+    setTimeout(() => jobs.delete(req.params.id), 10000); 
   }
 });
 
