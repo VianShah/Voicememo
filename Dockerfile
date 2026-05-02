@@ -1,36 +1,51 @@
+# ══════════════════════════════════════════════════════════════════════
+# VoiceInsight AI — Multi-stage Dockerfile
+# Stage 1: Build the Vite React frontend
+# Stage 2: Python runtime with FastAPI + Celery + Whisper
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Stage 1: Build React frontend ────────────────────────────────────
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /build
+
+COPY package.json ./
+RUN npm install
+
+COPY index.html vite.config.ts tsconfig.json ./
+COPY src/ src/
+
+RUN npm run build
+
+
+# ── Stage 2: Python runtime ──────────────────────────────────────────
 FROM python:3.11-slim
 
 WORKDIR /app
-run mkdir -p /app
-# Install FFmpeg for server-side audio conversion and Node.js for the app server
+
+# Install system dependencies (FFmpeg for audio processing)
 RUN apt-get update && \
-    apt-get install -y ffmpeg curl gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies for Whisper STT
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart "faster-whisper==1.0.3"
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy package files and install Node dependencies
-COPY package*.json ./
-RUN npm install
+# Copy application code
+COPY app/ app/
 
-# Copy application files
-COPY . .
+# Copy built frontend from Stage 1
+COPY --from=frontend-builder /build/dist dist/
 
-# Build the Vite React frontend
-RUN npm run build
+# Create data directories
+RUN mkdir -p data/raw data/snippets
 
 # Make start script executable
+COPY start.sh .
 RUN chmod +x start.sh
 
-# Persistent storage for audio recordings (HF Spaces mounts /data at runtime)
-ENV STORAGE_DIR=/data/recordings
+EXPOSE 8000
 
-# Expose port 7860 for Hugging Face Spaces
-EXPOSE 7860
-
-# Start both Whisper API and Node.js Server
 CMD ["./start.sh"]

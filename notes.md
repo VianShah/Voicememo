@@ -1,1 +1,0 @@
-i feel so much better when the sunday was at the beahc - it was just a matter of getting out o fthe house and plus it was the beahc that i didnt expect will get thr job done but it userly was a good time, while wiriting this im still here, lets try to push the app on hugging face 

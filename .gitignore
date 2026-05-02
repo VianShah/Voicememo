@@ -1,11 +1,30 @@
+# Dependencies
 node_modules/
-build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build output
 dist/
-coverage/
-.DS_Store
-*.log
-.env*
-!.env.example
-server/uploads/
-uploads/
+
+# Environment
+.env
+
+# Data storage (audio files, database)
+data/
+
+# Temp uploads
 tmp_uploads/
+uploads/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

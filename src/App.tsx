@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mic, Square, List, Plus, X, ChevronLeft, Play, Pause, Share2, Search, Send, MessageSquare, Sparkles } from 'lucide-react';
 import Waveform from './components/Waveform';
@@ -11,6 +11,8 @@ export default function App() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [insights, setInsights] = useState<Insight[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState('');
+  const [processingProgress, setProcessingProgress] = useState(0);
   const [view, setView] = useState<'gallery' | 'record' | 'detail' | 'rag'>('gallery');
   const [selectedInsight, setSelectedInsight] = useState<Insight | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -26,7 +28,17 @@ export default function App() {
   const timerRef = useRef<number>(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const snippetTimeoutRef = useRef<number | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
 
+  // ── Load insights from database on mount ─────────────────────────
+  useEffect(() => {
+    fetch('/v1/insights')
+      .then(res => res.ok ? res.json() : [])
+      .then(data => setInsights(data))
+      .catch(err => console.error('Failed to load insights:', err));
+  }, []);
+
+  // ── Audio playback helpers ───────────────────────────────────────
   const playSegment = (startTime: number, endTime: number) => {
     if (audioRef.current) {
       if (snippetTimeoutRef.current) window.clearTimeout(snippetTimeoutRef.current);
@@ -63,68 +75,90 @@ export default function App() {
     }
   }, [view]);
 
-  useEffect(() => {
-    const saved = localStorage.getItem('insight_recorder_data');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setInsights(parsed);
-      } catch (e) {
-        console.error('Failed to parse saved insights', e);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('insight_recorder_data', JSON.stringify(insights));
-  }, [insights]);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Poll task status until complete ──────────────────────────────
+  const pollTaskStatus = useCallback((taskId: string) => {
+    const statusLabels: Record<string, string> = {
+      pending: 'Queued...',
+      converting: 'Converting audio...',
+      transcribing: 'Transcribing with Whisper...',
+      filtering: 'Removing filler words...',
+      analyzing: 'Extracting insights via AI...',
+      slicing: 'Creating audio snippets...',
+      indexing: 'Indexing for search...',
+      completed: 'Done!',
+      failed: 'Processing failed',
+    };
+
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+
+    pollIntervalRef.current = window.setInterval(async () => {
+      try {
+        const res = await fetch(`/v1/status/${taskId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        setProcessingStatus(statusLabels[data.status] || data.status);
+        setProcessingProgress(data.progress || 0);
+
+        if (data.status === 'completed') {
+          clearInterval(pollIntervalRef.current!);
+          // Fetch the full insight
+          const insightRes = await fetch(`/v1/insights/${taskId}`);
+          if (insightRes.ok) {
+            const insight = await insightRes.json();
+            setInsights(prev => [insight, ...prev]);
+          }
+          setIsProcessing(false);
+          setView('gallery');
+        } else if (data.status === 'failed') {
+          clearInterval(pollIntervalRef.current!);
+          setIsProcessing(false);
+          alert(`Processing failed: ${data.errorMessage || 'Unknown error'}`);
+        }
+      } catch (err) {
+        console.error('Poll error:', err);
+      }
+    }, 2000);
+  }, []);
+
+  // ── Upload and process audio ─────────────────────────────────────
   const processAudio = async (audioBlob: Blob, duration: number) => {
     setIsProcessing(true);
+    setProcessingStatus('Uploading...');
+    setProcessingProgress(0);
+
     try {
-      // Send raw audio via multipart FormData — server handles DSP + conversion
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
 
-      const response = await fetch('/api/analyze', {
+      const response = await fetch('/v1/upload', {
         method: 'POST',
-        body: formData, // No Content-Type header — browser sets multipart boundary
+        body: formData,
       });
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || 'Analysis failed');
+        throw new Error(err.detail || 'Upload failed');
       }
-      const analysis = await response.json();
 
-      // Use server-hosted audio URL for persistent cross-device playback
-      const newInsight: Insight = {
-        timestamp: Date.now(),
-        duration: duration,
-        audioUrl: analysis.audioUrl || '',
-        ...analysis,
-        highlights: (analysis.highlights || []).map((h: any) => ({
-          ...h,
-          id: h.id || Math.random().toString(36).substr(2, 9),
-        })),
-      };
+      const { taskId } = await response.json();
+      setProcessingStatus('Processing queued...');
 
-      setInsights((prev) => [newInsight, ...prev]);
-      setIsProcessing(false);
-      setView('gallery');
+      // Start polling for status
+      pollTaskStatus(taskId);
+
     } catch (error) {
-      console.error('Processing failed', error);
+      console.error('Upload failed:', error);
       setIsProcessing(false);
-      alert('Failed to process audio. Please try again.');
+      alert('Failed to upload audio. Please try again.');
     }
   };
 
   const handleFileUpload = async (e: any) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Send file directly — no client-side AudioContext decoding needed
     await processAudio(file, 0);
   };
 
@@ -167,11 +201,12 @@ export default function App() {
     }
   };
 
+  // ── RAG Query ────────────────────────────────────────────────────
   const handleRagQuery = async () => {
     if (!ragQuery.trim()) return;
     setIsRagLoading(true);
     try {
-      const response = await fetch('/api/query', {
+      const response = await fetch('/v1/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: ragQuery })
@@ -189,9 +224,9 @@ export default function App() {
   };
 
   const filteredInsights = insights.filter(i => 
-    i.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    i.transcript.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    i.tags.some(t => t.toLowerCase().includes(searchQuery.toLowerCase()))
+    (i.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (i.transcript || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (i.tags || []).some(t => t.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   const moodGradients = {
@@ -408,6 +443,14 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Token savings badge */}
+              {(selectedInsight as any).tokenSavingsPercent > 0 && (
+                <div className="flex items-center gap-2 text-xs text-green-400/60">
+                  <Sparkles size={12} />
+                  <span>Filler words removed: saved {(selectedInsight as any).tokenSavingsPercent}% tokens</span>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Summary</h3>
                 <p className="text-sm text-white/80 leading-relaxed italic">
@@ -496,7 +539,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Processing Overlay */}
+      {/* Processing Overlay — now with real status from Celery */}
       <AnimatePresence>
         {isProcessing && (
           <motion.div 
@@ -519,11 +562,21 @@ export default function App() {
                 <div className="w-4 h-4 rounded-full bg-white" />
               </motion.div>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-3">
               <h3 className="text-xl font-medium">Distilling Insights</h3>
-              <p className="text-sm text-white/40 font-light">
-                Our AI is listening for the gold nuggets in your thoughts...
+              <p className="text-sm text-white/60 font-light">
+                {processingStatus}
               </p>
+              {/* Progress bar */}
+              <div className="w-48 mx-auto h-1 bg-white/10 rounded-full overflow-hidden">
+                <motion.div 
+                  className="h-full bg-white/60"
+                  initial={{ width: '0%' }}
+                  animate={{ width: `${processingProgress}%` }}
+                  transition={{ duration: 0.5, ease: "easeOut" }}
+                />
+              </div>
+              <p className="text-xs text-white/30 font-mono">{Math.round(processingProgress)}%</p>
             </div>
           </motion.div>
         )}
