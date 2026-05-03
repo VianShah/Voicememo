@@ -18,9 +18,9 @@ def download_gemma():
         print("huggingface_hub not installed. Run: pip install huggingface_hub")
         return
 
-    # Gemma 4 E2B is optimized for mobile/edge and fits under 2GB RAM
-    repo_id = "google/gemma-4-e2b-it-litert-lm"
-    filename = "gemma-4-e2b-it.litertlm"
+    # Correct Repo ID for LiteRT community models
+    repo_id = "litert-community/gemma-4-E2B-it-litert-lm"
+    filename = "gemma-4-E2B-it.litertlm"
     
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
