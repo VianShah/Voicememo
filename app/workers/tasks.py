@@ -140,6 +140,9 @@ def process_audio_task(self, task_id: str, file_path: str):
         _update_task_status(task_id, "slicing", 70.0)
 
         from app.services.audio_engine import create_highlight_snippets
+        from app.services.storage import get_storage_service
+        storage = get_storage_service()
+        
         snippet_results = create_highlight_snippets(
             wav_path=wav_path,
             highlights=resolved_highlights,
@@ -147,12 +150,24 @@ def process_audio_task(self, task_id: str, file_path: str):
             insight_id=task_id,
         )
 
-        # Map snippet URLs to highlights
-        snippet_map = {s.highlight_id: s.snippet_url for s in snippet_results}
+        # Upload snippets to S3 and map URLs to highlights
+        snippet_map = {}
+        for s in snippet_results:
+            dest_name = f"snippets/{os.path.basename(s.snippet_path)}"
+            s3_url = storage.upload_file(s.snippet_path, dest_name, "audio/mpeg")
+            snippet_map[s.highlight_id] = s3_url
+            
+            # Clean up local snippet after upload if S3 is enabled
+            if storage.is_s3_enabled:
+                try:
+                    os.remove(s.snippet_path)
+                except OSError:
+                    pass
+                    
         for h in resolved_highlights:
             h["snippet_url"] = snippet_map.get(h["id"])
 
-        _log_sys_stats(task_id, "Audio Slicing End", "Snippets successfully generated")
+        _log_sys_stats(task_id, "Audio Slicing End", "Snippets successfully uploaded")
 
         # ── Step 7: Pinecone Embedding + Upsert ─────────────────────
         _log_sys_stats(task_id, "Vector Embed Start", "Preparing chunks for Pinecone (Network Bound)...")
@@ -165,7 +180,17 @@ def process_audio_task(self, task_id: str, file_path: str):
         audio_filename = f"{task_id}.wav"
         audio_storage_path = os.path.join(settings.RAW_AUDIO_DIR, audio_filename)
         shutil.copy2(wav_path, audio_storage_path)
-        audio_url = f"/v1/recordings/{audio_filename}"
+        
+        # Upload to S3
+        dest_name = f"raw/{audio_filename}"
+        audio_url = storage.upload_file(audio_storage_path, dest_name, "audio/wav")
+        
+        # Clean up local raw audio if S3 is enabled
+        if storage.is_s3_enabled:
+            try:
+                os.remove(audio_storage_path)
+            except OSError:
+                pass
 
         # ── Save to database ────────────────────────────────────────
         _log_sys_stats(task_id, "Database Save Start", "Writing metadata to PostgreSQL...")

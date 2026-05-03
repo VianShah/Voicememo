@@ -45,6 +45,7 @@ services:
       - .env
     volumes:
       - appdata:/app/data
+      - ./models:/app/models
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,6 +70,7 @@ services:
       - .env
     volumes:
       - appdata:/app/data
+      - ./models:/app/models
     depends_on:
       postgres:
         condition: service_healthy

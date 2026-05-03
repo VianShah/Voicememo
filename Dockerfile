@@ -25,7 +25,7 @@ WORKDIR /app
 
 # Install system dependencies (FFmpeg for audio processing)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg libgl1-mesa-glx libglib2.0-0 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

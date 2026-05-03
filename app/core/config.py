@@ -17,8 +17,9 @@ class Settings(BaseSettings):
     PINECONE_INDEX: str = "voicememos"
 
     # ── LLM Configuration ───────────────────────────────────────────
-    LLM_PROVIDER: str = "gemini"          # gemini | groq | openai | deepseek
+    LLM_PROVIDER: str = "gemini"          # gemini | groq | openai | deepseek | litert
     GEMINI_MODEL: str = "gemini-2.5-flash"
+    LITERT_MODEL_PATH: str = "./models/gemma-2b-it.litertlm"
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     DEEPSEEK_API_KEY: str = ""
@@ -36,10 +37,16 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
 
-    # ── Storage ─────────────────────────────────────────────────────
     STORAGE_DIR: str = "./data"
     RAW_AUDIO_DIR: str = "./data/raw"
     SNIPPETS_DIR: str = "./data/snippets"
+
+    # ── S3 Object Storage ───────────────────────────────────────────
+    S3_BUCKET_NAME: str = ""
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "auto"
+    S3_ENDPOINT_URL: str = ""
 
     # ── Server ──────────────────────────────────────────────────────
     HOST: str = "0.0.0.0"

@@ -74,6 +74,9 @@ def get_llm_provider() -> LLMProvider:
     if provider == "gemini":
         from app.services.llm.gemini import GeminiProvider
         return GeminiProvider()
+    elif provider == "litert":
+        from app.services.llm.litert import LiteRTProvider
+        return LiteRTProvider()
     elif provider == "groq":
         from app.services.llm.groq import GroqProvider
         return GroqProvider()
@@ -83,5 +86,5 @@ def get_llm_provider() -> LLMProvider:
     else:
         raise ValueError(
             f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: gemini, groq, openai"
+            f"Supported: gemini, litert, groq, openai"
         )

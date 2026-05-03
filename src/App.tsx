@@ -7,6 +7,7 @@ import { Insight } from './types';
 
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [insights, setInsights] = useState<Insight[]>([]);
@@ -178,6 +179,7 @@ export default function App() {
       };
       mediaRecorder.start();
       setIsRecording(true);
+      setIsPaused(false);
       setView('record');
       setRecordTime(0);
       timerRef.current = window.setInterval(() => {
@@ -189,10 +191,29 @@ export default function App() {
     }
   };
 
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && isRecording && !isPaused) {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
+      clearInterval(timerRef.current);
+    }
+  };
+
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current && isRecording && isPaused) {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+      timerRef.current = window.setInterval(() => {
+        setRecordTime(prev => prev + 1);
+      }, 1000);
+    }
+  };
+
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
+      setIsPaused(false);
       clearInterval(timerRef.current);
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -386,6 +407,17 @@ export default function App() {
               <div className="w-full max-w-xs aspect-square relative flex items-center justify-center">
                 <div className="absolute inset-0 rounded-full border border-white/5 scale-110" />
                 <div className="absolute inset-0 rounded-full border border-white/10 scale-125" />
+                
+                {/* Pause/Resume Button */}
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={isPaused ? resumeRecording : pauseRecording}
+                  className="absolute top-0 right-0 w-12 h-12 rounded-full bg-white/10 text-white flex items-center justify-center border border-white/10 z-20"
+                >
+                  {isPaused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}
+                </motion.button>
+
                 <motion.button
                   whileTap={{ scale: 0.9 }}
                   onClick={stopRecording}
@@ -394,7 +426,7 @@ export default function App() {
                   <Square size={48} fill="currentColor" />
                 </motion.button>
                 <div className="absolute -bottom-12 left-0 right-0">
-                  <Waveform stream={stream} isRecording={isRecording} color="white" />
+                  <Waveform stream={stream} isRecording={isRecording && !isPaused} color="white" />
                 </div>
               </div>
               <p className="text-sm text-white/60 font-light italic text-center px-8">

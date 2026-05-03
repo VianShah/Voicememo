@@ -96,12 +96,40 @@ settings = get_settings()
 # Serve raw recordings
 raw_audio_path = Path(settings.RAW_AUDIO_DIR)
 raw_audio_path.mkdir(parents=True, exist_ok=True)
-app.mount("/v1/recordings", StaticFiles(directory=str(raw_audio_path)), name="recordings")
+from fastapi.responses import RedirectResponse
+from fastapi import HTTPException
+from app.services.storage import get_storage_service
 
-# Serve audio snippets
-snippets_path = Path(settings.SNIPPETS_DIR)
-snippets_path.mkdir(parents=True, exist_ok=True)
-app.mount("/v1/snippets", StaticFiles(directory=str(snippets_path)), name="snippets")
+@app.get("/v1/recordings/{filename}")
+async def serve_recording(filename: str):
+    storage = get_storage_service()
+    if storage.is_s3_enabled:
+        url = storage.generate_presigned_url(f"raw/{filename}")
+        if not url:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        return RedirectResponse(url)
+    else:
+        file_path = raw_audio_path / filename
+        if file_path.exists():
+            return FileResponse(str(file_path))
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+@app.get("/v1/snippets/{filename}")
+async def serve_snippet(filename: str):
+    snippets_path = Path(settings.SNIPPETS_DIR)
+    snippets_path.mkdir(parents=True, exist_ok=True)
+    
+    storage = get_storage_service()
+    if storage.is_s3_enabled:
+        url = storage.generate_presigned_url(f"snippets/{filename}")
+        if not url:
+            raise HTTPException(status_code=404, detail="Snippet not found")
+        return RedirectResponse(url)
+    else:
+        file_path = snippets_path / filename
+        if file_path.exists():
+            return FileResponse(str(file_path))
+        raise HTTPException(status_code=404, detail="Snippet not found")
 
 
 # ── Serve Vite React frontend (production) ──────────────────────────
