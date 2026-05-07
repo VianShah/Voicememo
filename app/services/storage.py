@@ -55,9 +55,12 @@ class StorageService:
                 logger.error("Failed to upload %s to S3: %s", destination_name, e)
                 raise
         else:
-            # Fallback to local storage (existing logic handles local copies outside of this class for now,
-            # but we can return the local path convention)
-            return f"/v1/recordings/{destination_name}"
+            # Local storage: return URL matching the serve_recording / serve_snippet endpoints
+            # which only capture the bare filename (no subdirectory prefix).
+            filename = os.path.basename(destination_name)
+            if destination_name.startswith("snippets/"):
+                return f"/v1/snippets/{filename}"
+            return f"/v1/recordings/{filename}"
 
     def generate_presigned_url(self, object_name: str, expiration: int = 3600) -> str:
         """

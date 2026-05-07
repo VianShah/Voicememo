@@ -5,6 +5,7 @@ Serves the API (v1 routes) and the built Vite React frontend as static files.
 """
 
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -90,46 +91,116 @@ async def health_check():
     }
 
 
-# ── Serve audio files ──────────────────────────────────────────────
+# ── Serve audio files (with HTTP Range / 206 support) ─────────────
 settings = get_settings()
 
-# Serve raw recordings
 raw_audio_path = Path(settings.RAW_AUDIO_DIR)
 raw_audio_path.mkdir(parents=True, exist_ok=True)
-from fastapi.responses import RedirectResponse
+
+from fastapi import Request
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi import HTTPException
 from app.services.storage import get_storage_service
 
-@app.get("/v1/recordings/{filename}")
-async def serve_recording(filename: str):
+
+def _range_streaming_response(file_path: Path, media_type: str, request: Request):
+    """
+    Return a StreamingResponse that honours the HTTP ``Range`` header.
+    Without this, browser <audio> elements stall on 206 because
+    FastAPI's plain FileResponse does not implement byte-range serving.
+    """
+    file_size = file_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    # ── No Range header → serve the whole file ─────────────────────
+    if not range_header:
+        def full_iter():
+            with open(file_path, "rb") as f:
+                while chunk := f.read(65536):
+                    yield chunk
+        return StreamingResponse(
+            full_iter(),
+            status_code=200,
+            media_type=media_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+            },
+        )
+
+    # ── Parse Range header (e.g. "bytes=0-1023") ───────────────────
+    try:
+        unit, ranges = range_header.split("=", 1)
+        start_str, end_str = ranges.split("-", 1)
+        start = int(start_str) if start_str.strip() else 0
+        end   = int(end_str)   if end_str.strip()   else file_size - 1
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=416, detail="Invalid Range header")
+
+    if start > end or end >= file_size:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    chunk_size = end - start + 1
+
+    def range_iter():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = chunk_size
+            while remaining > 0:
+                data = f.read(min(65536, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    return StreamingResponse(
+        range_iter(),
+        status_code=206,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(chunk_size),
+        },
+    )
+
+
+@app.get("/v1/recordings/{filename:path}")
+async def serve_recording(filename: str, request: Request):
+    """Serve a raw WAV recording with proper byte-range support."""
+    bare_filename = os.path.basename(filename)
     storage = get_storage_service()
     if storage.is_s3_enabled:
-        url = storage.generate_presigned_url(f"raw/{filename}")
+        url = storage.generate_presigned_url(f"raw/{bare_filename}")
         if not url:
             raise HTTPException(status_code=404, detail="Recording not found")
         return RedirectResponse(url)
-    else:
-        file_path = raw_audio_path / filename
-        if file_path.exists():
-            return FileResponse(str(file_path))
+    file_path = raw_audio_path / bare_filename
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="Recording not found")
+    return _range_streaming_response(file_path, "audio/wav", request)
 
-@app.get("/v1/snippets/{filename}")
-async def serve_snippet(filename: str):
+
+@app.get("/v1/snippets/{filename:path}")
+async def serve_snippet(filename: str, request: Request):
+    """Serve an MP3 snippet with proper byte-range support."""
     snippets_path = Path(settings.SNIPPETS_DIR)
     snippets_path.mkdir(parents=True, exist_ok=True)
-    
+    bare_filename = os.path.basename(filename)
     storage = get_storage_service()
     if storage.is_s3_enabled:
-        url = storage.generate_presigned_url(f"snippets/{filename}")
+        url = storage.generate_presigned_url(f"snippets/{bare_filename}")
         if not url:
             raise HTTPException(status_code=404, detail="Snippet not found")
         return RedirectResponse(url)
-    else:
-        file_path = snippets_path / filename
-        if file_path.exists():
-            return FileResponse(str(file_path))
+    file_path = snippets_path / bare_filename
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="Snippet not found")
+    return _range_streaming_response(file_path, "audio/mpeg", request)
 
 
 # ── Serve Vite React frontend (production) ──────────────────────────

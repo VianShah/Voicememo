@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════
-# VoiceInsight AI — Multi-stage Dockerfile
+# VoiceInsight AI — Hugging Face Spaces Dockerfile
 # Stage 1: Build the Vite React frontend
-# Stage 2: Python runtime with FastAPI + Celery + Whisper
+# Stage 2: Python runtime with FastAPI + Celery + Whisper + Postgres + Redis
 # ══════════════════════════════════════════════════════════════════════
 
 # ── Stage 1: Build React frontend ────────────────────────────────────
@@ -23,21 +23,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Point HuggingFace cache to a predictable location inside the volume mount
 ENV HF_HOME=/app/models/.cache/huggingface
+ENV PORT=7860
 
-# Install system dependencies (FFmpeg for audio processing)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# System deps: FFmpeg + PostgreSQL + Redis + Supervisor
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libgl1 libglib2.0-0 \
+    postgresql postgresql-client \
+    redis-server \
+    supervisor \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the Whisper model so runtime needs NO internet connection
-# The model lands in /app/models/.cache/huggingface (matches the volume mount)
+# Pre-download Whisper model so runtime needs NO internet connection
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
 
 # Copy application code
@@ -46,13 +47,14 @@ COPY app/ app/
 # Copy built frontend from Stage 1
 COPY --from=frontend-builder /build/dist dist/
 
-# Create data directories
-RUN mkdir -p data/raw data/snippets
+# Copy supervisord config
+COPY supervisord.hf.conf /etc/supervisor/conf.d/voiceinsight.conf
 
-# Make start script executable
-COPY start.sh .
-RUN chmod +x start.sh
+# Create necessary directories
+RUN mkdir -p data/raw data/snippets /var/run/postgresql /var/lib/postgresql/data
+RUN chown -R postgres:postgres /var/run/postgresql /var/lib/postgresql/data
 
-EXPOSE 8000
+EXPOSE 7860
 
-CMD ["./start.sh"]
+# Start supervisor which will manage Postgres, Redis, Celery, and FastAPI
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/voiceinsight.conf"]
