@@ -26,11 +26,16 @@ WORKDIR /app
 # Point HuggingFace cache to a predictable location inside the volume mount
 ENV HF_HOME=/app/models/.cache/huggingface
 
-# Install system dependencies (FFmpeg for audio processing)
+# Install system dependencies (FFmpeg for audio processing, Redis, and Postgres)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 && \
+    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 redis-server postgresql sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Pre-configure PostgreSQL database during image build
+RUN service postgresql start && \
+    su - postgres -c "psql -c \"CREATE USER voiceinsight WITH PASSWORD 'voiceinsight';\"" && \
+    su - postgres -c "psql -c \"CREATE DATABASE voiceinsight OWNER voiceinsight;\""
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -53,6 +58,6 @@ RUN mkdir -p data/raw data/snippets
 COPY start.sh .
 RUN chmod +x start.sh
 
-EXPOSE 8000
+EXPOSE 7860
 
 CMD ["./start.sh"]

@@ -5,6 +5,14 @@ echo "╔═══════════════════════�
 echo "║         VoiceInsight AI — Starting Services          ║"
 echo "╚══════════════════════════════════════════════════════╝"
 
+# Start Redis
+echo "🔧 Starting Redis..."
+redis-server --daemonize yes
+
+# Start PostgreSQL
+echo "🔧 Starting PostgreSQL..."
+service postgresql start
+
 # Start Celery worker in background
 echo "🔧 Starting Celery worker..."
 celery -A app.workers.celery_app:celery_app worker \
@@ -16,7 +24,7 @@ CELERY_PID=$!
 echo "🚀 Starting FastAPI server..."
 uvicorn app.main:app \
     --host 0.0.0.0 \
-    --port 8000 \
+    --port 7860 \
     --workers 1 &
 API_PID=$!
 
