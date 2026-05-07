@@ -5,7 +5,9 @@ colorFrom: blue
 colorTo: indigo
 sdk: docker
 pinned: false
- https://ai.studio/apps/14e4b42e-f770-41fb-9f37-b327b84d7883
+---
+
+https://ai.studio/apps/14e4b42e-f770-41fb-9f37-b327b84d7883
 
 ## Run Locally
 
