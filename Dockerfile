@@ -24,7 +24,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Point HuggingFace cache to a predictable location inside the volume mount
-ENV HF_HOME=/app/models/.cache/huggingface
+ENV HF_HOME=/app/.cache/huggingface
 
 # Install system dependencies (FFmpeg for audio processing, Redis, and Postgres)
 RUN apt-get update && \
@@ -43,7 +43,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download the Whisper model so runtime needs NO internet connection
 # The model lands in /app/models/.cache/huggingface (matches the volume mount)
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('distil-large-v3', device='cpu', compute_type='int8')"
 
 # Copy application code
 COPY app/ app/

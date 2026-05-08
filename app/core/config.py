@@ -19,15 +19,17 @@ class Settings(BaseSettings):
     # ── LLM Configuration ───────────────────────────────────────────
     LLM_PROVIDER: str = "gemini"          # gemini | groq | openai | deepseek | litert
     GEMINI_MODEL: str = "gemini-2.5-flash"
-    LITERT_MODEL_PATH: str = "./models/gemma-2b-it.litertlm"
+    LITERT_MODEL_PATH: str = "./models/gemma-4-E2B-it.litertlm"
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     DEEPSEEK_API_KEY: str = ""
 
     # ── Whisper Configuration ───────────────────────────────────────
-    WHISPER_MODEL: str = "large-v3-turbo"
+    WHISPER_MODEL: str = "distil-large-v3"
     WHISPER_DEVICE: str = "cpu"
     WHISPER_COMPUTE_TYPE: str = "int8"
+    WHISPER_BEAM_SIZE: int = 1
+    WHISPER_LANGUAGE: str = "en"
 
     # ── Database ────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://voiceinsight:voiceinsight@localhost:5432/voiceinsight"

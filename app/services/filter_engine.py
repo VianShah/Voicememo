@@ -60,7 +60,7 @@ class FillerFilterEngine:
 
     def filter(self, words: list[WordTimestamp]) -> FilteredTranscript:
         """
-        Remove filler words while building a coordinate map.
+        Remove filler words and collapse stutters while building a coordinate map.
 
         Args:
             words: Word-level timestamps from the transcription service.
@@ -77,6 +77,9 @@ class FillerFilterEngine:
                 removed_count=0,
                 token_savings_percent=0.0,
             )
+
+        # Collapse stuttered repetitions (3+ consecutive identical words)
+        words = self._collapse_repetitions(words)
 
         original_count = len(words)
 
@@ -147,3 +150,45 @@ class FillerFilterEngine:
     def _normalize(word: str) -> str:
         """Lowercase and strip punctuation for comparison."""
         return re.sub(r"[^\w\s]", "", word.lower()).strip()
+
+    @staticmethod
+    def _collapse_repetitions(
+        words: list[WordTimestamp], min_repeat: int = 3
+    ) -> list[WordTimestamp]:
+        """
+        Collapse 3+ consecutive identical words (stutters) into one.
+
+        "the the the project" → "the project"
+        "I I think" → kept as-is (only 2, could be emphasis)
+
+        This is intentionally conservative — we never remove words that
+        might carry semantic intent. Only clear stutters (3+) are collapsed.
+        """
+        if not words:
+            return words
+
+        result: list[WordTimestamp] = []
+        i = 0
+        collapsed_count = 0
+        while i < len(words):
+            count = 1
+            normalized = words[i].word.lower().strip()
+            while (
+                i + count < len(words)
+                and words[i + count].word.lower().strip() == normalized
+            ):
+                count += 1
+
+            result.append(words[i])  # Always keep first occurrence
+            if count >= min_repeat:
+                collapsed_count += count - 1
+                i += count  # Skip the repeated duplicates
+            else:
+                i += 1  # Keep all (not enough repeats to be a stutter)
+
+        if collapsed_count > 0:
+            logger.info(
+                "Repetition collapse: removed %d stuttered words",
+                collapsed_count,
+            )
+        return result

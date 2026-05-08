@@ -19,13 +19,16 @@ celery_app.conf.update(
     accept_content=["json"],
     result_serializer="json",
 
-    # ── Timeouts ────────────────────────────────────────────────────
-    task_soft_time_limit=600,      # 10 min soft limit
-    task_time_limit=900,           # 15 min hard kill
+    # ── Timeouts (generous for 45-min recordings on CPU) ────────────
+    task_soft_time_limit=2400,     # 40 min soft limit
+    task_time_limit=3000,          # 50 min hard kill
 
     # ── Worker concurrency ──────────────────────────────────────────
-    worker_concurrency=2,          # Whisper is CPU-heavy, don't oversubscribe
+    worker_concurrency=1,          # Single task — prevent CPU contention
     worker_prefetch_multiplier=1,  # One task at a time per worker
+
+    # ── Reliability ─────────────────────────────────────────────────
+    task_acks_late=True,           # Re-queue if worker crashes mid-task
 
     # ── Result expiry ───────────────────────────────────────────────
     result_expires=3600,           # Clean up results after 1 hour

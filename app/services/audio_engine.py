@@ -70,18 +70,20 @@ def convert_to_wav(input_path: str | Path, output_path: str | Path | None = None
 
 
 def slice_snippet(
-    wav_path: str | Path,
+    audio: "AudioSegment",
     start_time: float,
     end_time: float,
     output_path: str | Path,
 ) -> str:
     """
-    Slice an audio segment from a WAV file and save as MP3.
+    Slice an audio segment and save as MP3.
 
-    Uses pydub for precise millisecond-level slicing.
+    Uses a pre-loaded AudioSegment for precise millisecond-level slicing.
+    The AudioSegment should be loaded once by the caller to avoid
+    redundant disk I/O for each snippet.
 
     Args:
-        wav_path: Path to the source WAV file.
+        audio: Pre-loaded AudioSegment from the source WAV file.
         start_time: Start time in seconds.
         end_time: End time in seconds.
         output_path: Path to save the output MP3 snippet.
@@ -89,14 +91,9 @@ def slice_snippet(
     Returns:
         Path to the created MP3 snippet.
     """
-    from pydub import AudioSegment
-
-    wav_path = str(wav_path)
     output_path = str(output_path)
 
-    logger.debug("Slicing snippet: %.2fs → %.2fs from %s", start_time, end_time, os.path.basename(wav_path))
-
-    audio = AudioSegment.from_wav(wav_path)
+    logger.debug("Slicing snippet: %.2fs → %.2fs", start_time, end_time)
 
     # pydub works in milliseconds
     start_ms = int(start_time * 1000)
@@ -128,6 +125,9 @@ def create_highlight_snippets(
     """
     Create MP3 snippet files for each highlight.
 
+    Loads the WAV file ONCE and passes the AudioSegment to each
+    slice_snippet call to avoid redundant disk I/O.
+
     Args:
         wav_path: Path to the source WAV file.
         highlights: List of dicts with 'id', 'start_time', 'end_time'.
@@ -138,9 +138,19 @@ def create_highlight_snippets(
     Returns:
         List of SnippetResult objects with file paths and URLs.
     """
+    from pydub import AudioSegment
+    import time
+
     snippets_dir = Path(snippets_dir)
     snippets_dir.mkdir(parents=True, exist_ok=True)
     results: list[SnippetResult] = []
+
+    # Load WAV file ONCE (could be 85 MB for a 45-min recording)
+    t0 = time.time()
+    audio = AudioSegment.from_wav(str(wav_path))
+    load_time = time.time() - t0
+    logger.info("Loaded WAV for slicing in %.1fs (%.1f MB)",
+                load_time, os.path.getsize(str(wav_path)) / 1024 / 1024)
 
     for h in highlights:
         h_id = h.get("id", "unknown")
@@ -156,7 +166,7 @@ def create_highlight_snippets(
         snippet_url = f"{base_url}/{filename}"
 
         try:
-            slice_snippet(wav_path, start, end, output_path)
+            slice_snippet(audio, start, end, output_path)
             results.append(SnippetResult(
                 highlight_id=h_id,
                 snippet_path=output_path,
