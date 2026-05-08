@@ -41,12 +41,13 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - HF_HOME=/app/models/.cache/huggingface
+      - HF_HOME=/app/.cache/huggingface
     env_file:
       - .env
     volumes:
       - appdata:/app/data
       - ./models:/app/models
+      - hfcache:/app/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,12 +68,15 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - HF_HOME=/app/models/.cache/huggingface
+      - HF_HOME=/app/.cache/huggingface
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
     env_file:
       - .env
     volumes:
       - appdata:/app/data
       - ./models:/app/models
+      - hfcache:/app/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,8 +85,9 @@ services:
     command: >
       celery -A app.workers.celery_app:celery_app worker
       --loglevel=info
-      --concurrency=2
+      --concurrency=1
 
 volumes:
   pgdata:
   appdata:
+  hfcache:  # Persists HuggingFace model cache across container restarts

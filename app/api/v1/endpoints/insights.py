@@ -93,10 +93,14 @@ async def get_insight(task_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/insights", response_model=list[InsightResponse])
 async def list_insights(db: AsyncSession = Depends(get_db)):
     """
-    List all insights, ordered by most recent first.
+    List all insights that have viewable content, ordered by most recent first.
+
+    Includes partially-processed insights (transcribed, filtered, analyzed)
+    so users can see progressive results while processing continues.
     """
+    viewable_statuses = ["transcribed", "filtered", "analyzed", "completed", "partial"]
     result = await db.execute(
-        select(Insight).where(Insight.status == "completed").order_by(Insight.created_at.desc())
+        select(Insight).where(Insight.status.in_(viewable_statuses)).order_by(Insight.created_at.desc())
     )
     insights = result.scalars().all()
 

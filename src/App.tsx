@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, Square, List, Plus, X, ChevronLeft, Play, Pause, Share2, Search, Send, MessageSquare, Sparkles } from 'lucide-react';
+import { Mic, Square, List, Plus, X, ChevronLeft, Play, Pause, Share2, Search, Send, MessageSquare, Sparkles, Bell, Clock, CheckCircle } from 'lucide-react';
 import Waveform from './components/Waveform';
 import InsightCard from './components/InsightCard';
 import { Insight } from './types';
@@ -23,6 +23,12 @@ export default function App() {
   const [ragResponse, setRagResponse] = useState<string | null>(null);
   const [isRagLoading, setIsRagLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Background processing UX state
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [showBanner, setShowBanner] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showToast, setShowToast] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -85,10 +91,14 @@ export default function App() {
       converting: 'Converting audio...',
       transcribing: 'Transcribing with Whisper...',
       filtering: 'Removing filler words...',
+      transcribed: 'Transcript ready, analyzing...',
+      filtered: 'Cleaned, extracting insights...',
       analyzing: 'Extracting insights via AI...',
+      analyzed: 'Creating audio snippets...',
       slicing: 'Creating audio snippets...',
       indexing: 'Indexing for search...',
       completed: 'Done!',
+      partial: 'Partial results saved',
       failed: 'Processing failed',
     };
 
@@ -103,25 +113,44 @@ export default function App() {
         setProcessingStatus(statusLabels[data.status] || data.status);
         setProcessingProgress(data.progress || 0);
 
-        if (data.status === 'completed') {
+        if (data.status === 'completed' || data.status === 'partial') {
           clearInterval(pollIntervalRef.current!);
           // Fetch the full insight
           const insightRes = await fetch(`/v1/insights/${taskId}`);
           if (insightRes.ok) {
             const insight = await insightRes.json();
-            setInsights(prev => [insight, ...prev]);
+            setInsights(prev => {
+              // Replace if already exists (from progressive polling), or add
+              const exists = prev.findIndex(i => i.taskId === taskId || (i as any).task_id === taskId);
+              if (exists >= 0) {
+                const updated = [...prev];
+                updated[exists] = insight;
+                return updated;
+              }
+              return [insight, ...prev];
+            });
           }
           setIsProcessing(false);
+          setShowOverlay(false);
+          setShowBanner(false);
+
+          // Show toast notification
+          setToastMessage(data.status === 'completed' ? '✨ Your insight is ready!' : '⚠️ Partial results saved');
+          setShowToast(true);
+          setTimeout(() => setShowToast(false), 5000);
+
           setView('gallery');
         } else if (data.status === 'failed') {
           clearInterval(pollIntervalRef.current!);
           setIsProcessing(false);
+          setShowOverlay(false);
+          setShowBanner(false);
           alert(`Processing failed: ${data.errorMessage || 'Unknown error'}`);
         }
       } catch (err) {
         console.error('Poll error:', err);
       }
-    }, 2000);
+    }, 30000);
   }, []);
 
   // ── Upload and process audio ─────────────────────────────────────
@@ -146,6 +175,15 @@ export default function App() {
 
       const { taskId } = await response.json();
       setProcessingStatus('Processing queued...');
+      setShowOverlay(true);
+
+      // Auto-dismiss overlay after 5 seconds → switch to background banner
+      setTimeout(() => {
+        setShowOverlay(false);
+        setShowBanner(true);
+        // Switch to gallery so user can browse while processing
+        setView('gallery');
+      }, 5000);
 
       // Start polling for status
       pollTaskStatus(taskId);
@@ -153,6 +191,7 @@ export default function App() {
     } catch (error) {
       console.error('Upload failed:', error);
       setIsProcessing(false);
+      setShowOverlay(false);
       alert('Failed to upload audio. Please try again.');
     }
   };
@@ -483,13 +522,22 @@ export default function App() {
                 </div>
               )}
 
-              <div className="space-y-2">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Summary</h3>
-                <p className="text-sm text-white/80 leading-relaxed italic">
-                  {selectedInsight.summary}
-                </p>
-              </div>
+              {/* Summary — show if available, otherwise show analyzing message */}
+              {selectedInsight.summary ? (
+                <div className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Summary</h3>
+                  <p className="text-sm text-white/80 leading-relaxed italic">
+                    {selectedInsight.summary}
+                  </p>
+                </div>
+              ) : ((selectedInsight as any).status !== 'completed') && (
+                <div className="glass rounded-2xl p-4 flex items-center gap-3 text-white/30">
+                  <Sparkles size={16} className="animate-pulse text-blue-400/60" />
+                  <span className="text-sm italic">AI is still analyzing this recording...</span>
+                </div>
+              )}
 
+              {selectedInsight.highlights && selectedInsight.highlights.length > 0 && (
               <div className="space-y-6">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Gold Nuggets</h3>
                 <div className="space-y-4">
@@ -519,6 +567,7 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              )}
 
               <div className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Full Transcript</h3>
@@ -571,9 +620,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Processing Overlay — now with real status from Celery */}
+      {/* Processing Overlay — auto-dismisses to banner after 5s */}
       <AnimatePresence>
-        {isProcessing && (
+        {isProcessing && showOverlay && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -609,6 +658,58 @@ export default function App() {
                 />
               </div>
               <p className="text-xs text-white/30 font-mono">{Math.round(processingProgress)}%</p>
+              <p className="text-xs text-white/20 mt-4">This will continue in the background...</p>
+            </div>
+            <button
+              onClick={() => { setShowOverlay(false); setShowBanner(true); setView('gallery'); }}
+              className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 rounded-full text-sm text-white/60 hover:text-white transition-all border border-white/10"
+            >
+              Dismiss — process in background
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Background Processing Banner */}
+      <AnimatePresence>
+        {showBanner && isProcessing && view === 'gallery' && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-0 left-0 right-0 z-40 p-3"
+          >
+            <div className="max-w-md mx-auto glass rounded-2xl p-4 flex items-center justify-between border border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="w-3 h-3 rounded-full bg-blue-400 animate-pulse" />
+                <div>
+                  <p className="text-sm font-medium">Processing in background</p>
+                  <p className="text-xs text-white/40">{processingStatus} • {Math.round(processingProgress)}%</p>
+                </div>
+              </div>
+              <button onClick={() => setShowBanner(false)} className="text-white/30 hover:text-white transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {showToast && toastMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed bottom-24 left-0 right-0 z-50 flex justify-center"
+          >
+            <div className="glass rounded-2xl px-6 py-3 flex items-center gap-3 border border-white/10 shadow-2xl">
+              <CheckCircle size={18} className="text-green-400" />
+              <span className="text-sm font-medium">{toastMessage}</span>
+              <button onClick={() => setShowToast(false)} className="text-white/30 hover:text-white ml-2">
+                <X size={14} />
+              </button>
             </div>
           </motion.div>
         )}

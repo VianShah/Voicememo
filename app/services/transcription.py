@@ -6,7 +6,7 @@ in memory for all subsequent tasks (Architectural Guardrail B1).
 """
 
 import logging
-import tempfile
+import time
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,27 +52,49 @@ class TranscriptionService:
         """Load the Whisper model if not already loaded."""
         if self._model is not None:
             return
+        self._load_model()
 
-        from faster_whisper import WhisperModel
-        from app.core.config import get_settings
-
-        settings = get_settings()
-        logger.info(
-            "Loading Whisper model: %s (device=%s, compute_type=%s)...",
-            settings.WHISPER_MODEL,
-            settings.WHISPER_DEVICE,
-            settings.WHISPER_COMPUTE_TYPE,
-        )
-        self._model = WhisperModel(
-            settings.WHISPER_MODEL,
-            device=settings.WHISPER_DEVICE,
-            compute_type=settings.WHISPER_COMPUTE_TYPE,
-        )
-        logger.info("Whisper model loaded successfully.")
+    def _load_model(self):
+        """Lazy load the Whisper model into memory as a singleton."""
+        if self._model is None:
+            import time
+            import psutil
+            import os
+            
+            from app.core.config import get_settings
+            settings = get_settings()
+            
+            process = psutil.Process(os.getpid())
+            mem_before = process.memory_info().rss / (1024 * 1024)
+            
+            logger.info(
+                "Loading Whisper model: %s (device=%s, compute_type=%s) [ProcRAM before: %.1f MB]", 
+                settings.WHISPER_MODEL, settings.WHISPER_DEVICE, settings.WHISPER_COMPUTE_TYPE, mem_before
+            )
+            
+            start_load = time.time()
+            from faster_whisper import WhisperModel
+            self._model = WhisperModel(
+                settings.WHISPER_MODEL,
+                device=settings.WHISPER_DEVICE,
+                compute_type=settings.WHISPER_COMPUTE_TYPE,
+            )
+            
+            mem_after = process.memory_info().rss / (1024 * 1024)
+            logger.info(
+                "Whisper model loaded successfully in %.1fs. [ProcRAM after: %.1f MB, Delta: +%.1f MB]", 
+                time.time() - start_load, mem_after, mem_after - mem_before
+            )
 
     def transcribe(self, audio_path: str | Path) -> TranscriptionResult:
         """
         Transcribe an audio file and return word-level timestamps.
+
+        Uses distil-large-v3 optimizations:
+        - beam_size=1 (greedy decoding, ~2× faster)
+        - vad_filter=True (skip silence, major speedup for long recordings)
+        - condition_on_previous_text=False (recommended for distil models)
+        - language from config (skip auto-detect pass)
 
         Args:
             audio_path: Path to a WAV/MP3/M4A file.
@@ -83,16 +105,29 @@ class TranscriptionService:
         self._ensure_model()
         audio_path = str(audio_path)
 
-        logger.info("Transcribing: %s", os.path.basename(audio_path))
+        from app.core.config import get_settings
+        settings = get_settings()
+
+        logger.info("Transcribing: %s (beam=%d, lang=%s, vad=on)",
+                     os.path.basename(audio_path),
+                     settings.WHISPER_BEAM_SIZE,
+                     settings.WHISPER_LANGUAGE)
+
+        t0 = time.time()
         segments, info = self._model.transcribe(
             audio_path,
             word_timestamps=True,
-            language=None,  # Auto-detect
+            beam_size=settings.WHISPER_BEAM_SIZE,
+            language=settings.WHISPER_LANGUAGE if settings.WHISPER_LANGUAGE else None,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+            condition_on_previous_text=False,
         )
 
         words: list[WordTimestamp] = []
         full_text_parts: list[str] = []
 
+        # Eagerly collect all segments (the generator does actual inference)
         for segment in segments:
             full_text_parts.append(segment.text)
             if segment.words:
@@ -104,9 +139,12 @@ class TranscriptionService:
                     ))
 
         full_text = " ".join(full_text_parts).strip()
+        elapsed = time.time() - t0
+
         logger.info(
-            "Transcription complete: %d words, language=%s, duration=%.1fs",
-            len(words), info.language, info.duration,
+            "Transcription complete in %.1fs: %d words, language=%s, duration=%.1fs (%.1f× realtime)",
+            elapsed, len(words), info.language, info.duration,
+            info.duration / elapsed if elapsed > 0 else 0,
         )
 
         return TranscriptionResult(
